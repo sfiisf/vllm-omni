@@ -92,6 +92,11 @@ _OMNI_MODELS = {
         "qwen3_tts_talker",
         "Qwen3TTSTalkerForConditionalGeneration",
     ),
+    "Qwen3TTSPrepare": (
+        "qwen3_tts",
+        "qwen3_tts_prepare",
+        "Qwen3TTSPrepare",
+    ),
     "Qwen3TTSCode2Wav": (
         "qwen3_tts",
         "qwen3_tts_code2wav",

@@ -27,7 +27,7 @@ from vllm_omni.outputs import OmniRequestOutput
 logger = init_logger(__name__)
 
 # TTS Configuration (currently supports Qwen3-TTS)
-_TTS_MODEL_STAGES: set[str] = {"qwen3_tts"}
+_TTS_MODEL_STAGES: set[str] = {"qwen3_tts", "qwen3_tts_prepare"}
 _TTS_LANGUAGES: set[str] = {
     "Auto",
     "Chinese",
@@ -231,6 +231,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     def _estimate_prompt_len(self, tts_params: dict[str, Any]) -> int:
         """Estimate prompt length so the placeholder matches model-side embeddings."""
         try:
+            if getattr(self._tts_stage, "model_stage", None) == "qwen3_tts_prepare":
+                return 1
             from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
                 Qwen3TTSTalkerForConditionalGeneration,
             )
