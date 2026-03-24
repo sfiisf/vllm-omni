@@ -3,8 +3,8 @@ stage_args:
   - stage_id: 0
     stage_type: llm
     runtime:
-      devices: "0"
-      max_batch_size: 10
+      devices: "1"
+      max_batch_size: 1
     engine_args:
       model_stage: qwen3_tts_prepare
       model_arch: Qwen3TTSPrepare

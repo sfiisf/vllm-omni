@@ -114,33 +114,71 @@ class AsyncOmniLLM(AsyncLLM):
 
         self.renderer = renderer_from_config(self.vllm_config)
 
+        stage_name = engine_args.model_stage if engine_args.model_stage is not None else "unknown_stage"
+        if stage_name == "qwen3_tts_prepare":
+            self.core_num = 10
+        else:
+            self.core_num = 1
+
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        self.output_processor = MultimodalOutputProcessor(
-            tokenizer=self.renderer.tokenizer,
-            log_stats=self.log_stats,
-            engine_core_output_type=engine_args.engine_output_type,
-        )
+        if self.core_num == 1:
+            self.output_processor = MultimodalOutputProcessor(
+                tokenizer=self.renderer.tokenizer,
+                log_stats=self.log_stats,
+                engine_core_output_type=engine_args.engine_output_type,
+            )
+        else:
+            self.output_processor = [
+                MultimodalOutputProcessor(
+                    tokenizer=self.renderer.tokenizer,
+                    log_stats=self.log_stats,
+                    engine_core_output_type=engine_args.engine_output_type,
+                )
+                for _ in range(self.core_num)
+            ]
 
         if self.observability_config.otlp_traces_endpoint is not None:
             tracer = init_tracer("vllm.llm_engine", self.observability_config.otlp_traces_endpoint)
-            self.output_processor.tracer = tracer
+            if self.core_num == 1:
+                self.output_processor.tracer = tracer
+            else:
+                for op in self.output_processor:
+                    op.tracer = tracer
 
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
         self._paused = False
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_async_mp_client(
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=self.log_stats,
-            client_addresses=client_addresses,
-            client_count=client_count,
-            client_index=client_index,
-        )
+        if self.core_num == 1:
+            self.engine_core = EngineCoreClient.make_async_mp_client(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=self.log_stats,
+                client_addresses=client_addresses,
+                client_count=client_count,
+                client_index=client_index,
+            )
+        else:
+            if client_addresses is not None:
+                raise NotImplementedError(
+                    "multi-core prepare does not support externally managed client_addresses yet"
+                )
+            self.engine_core = [
+                EngineCoreClient.make_async_mp_client(
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=self.log_stats,
+                    client_addresses=client_addresses,
+                    client_count=client_count,
+                    client_index=client_index,
+                )
+                for _ in range(self.core_num)
+            ]
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
+        self.log_stats = False if self.core_num > 1 else self.log_stats
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
