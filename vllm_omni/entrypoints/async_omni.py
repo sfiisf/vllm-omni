@@ -40,6 +40,23 @@ _R = TypeVar("_R")
 logger = init_logger(__name__)
 
 
+def _build_async_seed_engine_input(prompt: Any, engine_outputs: Any) -> Any:
+    """Build a placeholder downstream request for async_chunk stages."""
+    prompt_token_ids = getattr(engine_outputs, "prompt_token_ids", None)
+    if prompt_token_ids is None:
+        prompt_token_ids = []
+
+    engine_input = copy.deepcopy(prompt)
+    next_prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
+    engine_input["prompt_token_ids"] = [0] * next_prompt_len
+    engine_input["multi_modal_data"] = engine_input["mm_processor_kwargs"] = None
+    for _mm_key in ("mm_kwargs", "mm_hashes", "mm_placeholders", "multi_modal_uuids"):
+        engine_input.pop(_mm_key, None)
+    if engine_input.get("type") == "multimodal":
+        engine_input["type"] = "token"
+    return engine_input
+
+
 def _weak_close_cleanup_async(
     stage_list, stage_in_queues, stage_out_queues, ray_pg, output_handler, zmq_ctx=None, inline_engine=None
 ):
@@ -546,7 +563,8 @@ class AsyncOmni(OmniBase):
         final_stage_id_for_e2e: int,
     ) -> AsyncGenerator[OmniRequestOutput, None]:
         all_stages_finished = {stage_id: False for stage_id in range(final_stage_id_for_e2e + 1)}
-        submit_flag = True
+        stage1_submitted = False
+        downstream_async_seeded = False
         _loop_iter = 0
         _last_progress_ts = time.time()
         while not all(all_stages_finished.values()):
@@ -566,23 +584,45 @@ class AsyncOmni(OmniBase):
                     stage_id,
                     metrics,
                 )
-                if submit_flag and stage_id == 0:
-                    submit_flag = False
-                    prompt_token_ids = getattr(engine_outputs, "prompt_token_ids", None)
-                    if prompt_token_ids is None:
-                        prompt_token_ids = []
-                    engine_input = copy.deepcopy(prompt)
-                    try:
-                        next_prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
-                    except Exception:
-                        raise
-                    engine_input["prompt_token_ids"] = [0] * next_prompt_len
-                    engine_input["multi_modal_data"] = engine_input["mm_processor_kwargs"] = None
-                    for _mm_key in ("mm_kwargs", "mm_hashes", "mm_placeholders", "multi_modal_uuids"):
-                        engine_input.pop(_mm_key, None)
-                    if engine_input.get("type") == "multimodal":
-                        engine_input["type"] = "token"
-                    for i in range(1, len(self.stage_list)):
+                if finished and stage_id == 0 and not stage1_submitted and final_stage_id_for_e2e >= 1:
+                    stage.set_engine_outputs([engine_outputs])
+                    next_stage = self.stage_list[1]
+                    with metrics.stage_postprocess_timer(stage_id, request_id):
+                        next_inputs = next_stage.process_engine_inputs(self.stage_list, prompt)
+                    task = {
+                        "request_id": request_id,
+                        "engine_inputs": next_inputs,
+                        "sampling_params": sampling_params_list[1],
+                    }
+                    # next_stage.submit(task)
+                    connector_key = ("0", "1")
+                    connector = self.connectors.get(connector_key)
+                    if connector:
+                        sent_via_connector = try_send_via_connector(
+                            connector=connector,
+                            stage_id=0,
+                            next_stage_id=1,
+                            req_id=request_id,
+                            next_inputs=next_inputs,
+                            sampling_params=sampling_params_list[1],
+                            original_prompt=prompt,
+                            next_stage_queue_submit_fn=self.stage_list[1].submit,
+                            metrics=metrics,
+                        )
+                        if sent_via_connector:
+                            logger.info(f"[{self._name}] Forwarded request {request_id} to stage-1 via connector")
+                        else:
+                            logger.error(
+                                f"[{self._name}] Failed to send request {request_id} to stage-1 via connector. "
+                                "Configure a connector for this edge or inspect connector logs for details."
+                            )
+                            raise RuntimeError("Failed to send request to stage-1 via connector")
+                    metrics.stage_first_ts[1] = time.time()
+                    stage1_submitted = True
+
+                if stage1_submitted and not downstream_async_seeded and final_stage_id_for_e2e >= 2:
+                    engine_input = _build_async_seed_engine_input(prompt, engine_outputs)
+                    for i in range(2, final_stage_id_for_e2e + 1):
                         task = {
                             "request_id": request_id,
                             "engine_inputs": engine_input,
@@ -590,6 +630,7 @@ class AsyncOmni(OmniBase):
                         }
                         self.stage_list[i].submit(task)
                         metrics.stage_first_ts[i] = time.time()
+                    downstream_async_seeded = True
                 all_stages_finished[stage_id] = finished
 
                 if output_to_yield:
@@ -626,7 +667,7 @@ class AsyncOmni(OmniBase):
                 next_stage: OmniStage = self.stage_list[next_stage_id]
                 # Derive inputs for the next stage, record postprocess time
                 with metrics.stage_postprocess_timer(stage_id, request_id):
-                    next_inputs = next_stage.process_engine_inputs(self.stage_list, prompt)
+                    next_inputs = next_stage.process_engine_inputs(self.stage_list, prompt)#
                 sp_next: SamplingParams = sampling_params_list[next_stage_id]
 
                 # Check if we have a connector for this edge

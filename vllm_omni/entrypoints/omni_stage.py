@@ -1272,6 +1272,9 @@ async def _stage_worker_async(
     final_output = stage_payload.get("final_output", False)
     final_output_type = stage_payload.get("final_output_type", None)
 
+    if stage_id == 0:
+        engine_args["async_chunk"] = False
+
     cfg_kv_collect_func = load_func_from_config(stage_payload.get("cfg_kv_collect_func"))
     # Handle non-standard model directory structures (e.g., tokenizer in root, model in subdir)
     model = _resolve_model_tokenizer_paths(model, engine_args)

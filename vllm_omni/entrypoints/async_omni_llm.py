@@ -117,6 +117,8 @@ class AsyncOmniLLM(AsyncLLM):
         stage_name = engine_args.model_stage if engine_args.model_stage is not None else "unknown_stage"
         if stage_name == "qwen3_tts_prepare":
             self.core_num = 10
+        elif stage_name == "code2wav":
+            self.core_num = 3
         else:
             self.core_num = 1
 
