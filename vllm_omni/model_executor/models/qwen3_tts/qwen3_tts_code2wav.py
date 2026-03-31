@@ -15,6 +15,8 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 
 from .qwen3_tts_tokenizer import Qwen3TTSTokenizer
 
+from torch.nn.utils.rnn import pad_sequence
+
 logger = init_logger(__name__)
 
 
@@ -273,10 +275,16 @@ class Qwen3TTSCode2Wav(nn.Module):
             wav = decoder.chunked_decode(codes_bqf)  # [1, 1, wav_len]
             wav_tensors.append(wav.squeeze(0).squeeze(0))  # [wav_len]
         else:
-            for codes_qf in valid_codes_qf:
-                codes_bqf = codes_qf.unsqueeze(0)  # [1, Q, F]
-                wav = decoder.chunked_decode(codes_bqf)
-                wav_tensors.append(wav.squeeze(0).squeeze(0))
+            # for codes_qf in valid_codes_qf:
+            #     codes_bqf = codes_qf.unsqueeze(0)  # [1, Q, F]
+            #     wav = decoder.chunked_decode(codes_bqf)
+            #     wav_tensors.append(wav.squeeze(0).squeeze(0))
+            # logger.info(f"++!! decode batch size {len(valid_codes_qf)} with padding")
+            codes_fq = [codes_qf.transpose(0, 1) for codes_qf in valid_codes_qf]  # [F, Q]
+            codes_bfq = pad_sequence(codes_fq, batch_first=True, padding_value=0)  # [B, F_max, Q]
+            codes_bqf = codes_bfq.permute(0, 2, 1).contiguous()  # [B, Q, F_max]
+            batch_wav = decoder.chunked_decode(codes_bqf)  # [B, 1, wav_len]
+            wav_tensors = [batch_wav[i, 0] for i in range(batch_wav.shape[0])]
 
         audios: list[torch.Tensor] = [empty] * num_req
         srs = [sr_tensor] * num_req

@@ -609,9 +609,7 @@ class AsyncOmni(OmniBase):
                             next_stage_queue_submit_fn=self.stage_list[1].submit,
                             metrics=metrics,
                         )
-                        if sent_via_connector:
-                            logger.info(f"[{self._name}] Forwarded request {request_id} to stage-1 via connector")
-                        else:
+                        if not sent_via_connector:
                             logger.error(
                                 f"[{self._name}] Failed to send request {request_id} to stage-1 via connector. "
                                 "Configure a connector for this edge or inspect connector logs for details."

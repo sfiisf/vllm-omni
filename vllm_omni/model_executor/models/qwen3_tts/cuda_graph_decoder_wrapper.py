@@ -29,7 +29,7 @@ class CUDAGraphDecoderWrapper:
         output = wrapper.decode(codes)  # Automatically uses CUDA graph if possible
     """
 
-    DEFAULT_CAPTURE_SIZES = [2, 4, 8, 16, 25, 32, 50, 100, 150, 200, 250, 300]
+    DEFAULT_CAPTURE_SIZES = [2, 4, 8, 16, 25, 32, 50]
 
     def __init__(
         self,
@@ -126,13 +126,17 @@ class CUDAGraphDecoderWrapper:
             return self.decoder(codes)
 
         if codes.shape[0] != 1:
+            # logger.info(f"Batch size {codes.shape[0]} not supported for CUDA Graph decoding, falling back to direct decode.")
             return self.decoder(codes)
 
         actual_size = codes.shape[-1]
         padded_size = self._get_padded_size(actual_size)
 
         if padded_size is None or padded_size not in self.graphs:
+            # logger.info(f"No suitable CUDA Graph for actual_size={actual_size}, falling back to direct decode.")
             return self.decoder(codes)
+
+        # logger.info(f"++!! Using CUDA Graph for decoding with actual_size={actual_size}, padded_size={padded_size}")
 
         self.static_inputs[padded_size].zero_()
         self.static_inputs[padded_size][:, :, :actual_size] = codes

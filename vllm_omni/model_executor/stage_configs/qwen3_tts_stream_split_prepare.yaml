@@ -67,8 +67,8 @@ stage_args:
   - stage_id: 2
     stage_type: llm
     runtime:
-      devices: "2"
-      max_batch_size: 1
+      devices: "1"
+      max_batch_size: 10
     engine_args:
       model_stage: code2wav
       model_arch: Qwen3TTSCode2Wav
