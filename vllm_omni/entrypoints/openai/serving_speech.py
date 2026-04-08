@@ -8,6 +8,7 @@ import struct
 import time
 from pathlib import Path
 from typing import Any
+from cachetools import LRUCache
 
 import numpy as np
 from fastapi import Request, UploadFile
@@ -48,6 +49,7 @@ _TTS_MAX_INSTRUCTIONS_LENGTH = 500
 _TTS_MAX_NEW_TOKENS_MIN = 1
 _TTS_MAX_NEW_TOKENS_MAX = 4096
 
+_CACHE_MAX_SIZE = int(os.getenv("TTS_CACHE_MAX_SIZE", 1000))
 
 def _create_wav_header(sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
     """Create a WAV header with placeholder size values for streaming.
@@ -162,6 +164,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Load speech tokenizer codec parameters for prompt length estimation
         self._codec_frame_rate: float | None = self._load_codec_frame_rate()
+
+        self._ref_audio_cache: LRUCache[str, tuple[np.ndarray, int]] | None = None
 
     def _load_codec_frame_rate(self) -> float | None:
         """Load codec frame rate from speech tokenizer config for prompt length estimation."""
@@ -859,6 +863,26 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             "additional_information": additional_information,
         }
 
+    async def _resolve_ref_audio_cache_spkid(
+        self,
+        request: OpenAICreateSpeechRequest,
+    ) -> tuple[list[float], int]:
+        spkid = request.voice.lower()
+        if spkid is None:
+            # logger.info(f"spkid is None, skip cache")
+            return await self._resolve_ref_audio(request.ref_audio)
+        
+        if self._ref_audio_cache is None:
+            self._ref_audio_cache = LRUCache(maxsize=_CACHE_MAX_SIZE)
+        if spkid in self._ref_audio_cache:
+            # logger.info(f"Cache hit for spkid={spkid}")
+            return self._ref_audio_cache[spkid]
+        
+        # logger.info(f"Cache miss for spkid={spkid}, resolving ref_audio")
+        wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+        self._ref_audio_cache[spkid] = (wav_list, sr)
+        return wav_list, sr
+
     async def _prepare_speech_generation(
         self,
         request: OpenAICreateSpeechRequest,
@@ -873,7 +897,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if request.ref_audio is not None:
                 if not request.ref_text or not request.ref_text.strip():
                     raise ValueError("Voice cloning requires 'ref_text' (transcript of the reference audio)")
-                wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+                # wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+                wav_list, sr = await self._resolve_ref_audio_cache_spkid(request)
                 ref_audio_data = (wav_list, sr)
             prompt = self._build_fish_speech_prompt(request, ref_audio_data=ref_audio_data)
             tts_params = {}
@@ -884,7 +909,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             tts_params = self._build_tts_params(request)
             if request.ref_audio is not None:
-                wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+                # wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
+                wav_list, sr = await self._resolve_ref_audio_cache_spkid(request)
                 tts_params["ref_audio"] = [[wav_list, sr]]
 
             ph_len = self._estimate_prompt_len(tts_params)

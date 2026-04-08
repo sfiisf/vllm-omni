@@ -61,6 +61,34 @@ class OpenAICreateSpeechRequest(BaseModel):
         description="Per-request initial chunk size override. If null, computed dynamically based on server load.",
     )
 
+    @model_validator(mode="before")
+    def faas2vllm(cls, data: dict) -> dict:
+        """Convert FaaS-style request to vLLM-style request."""
+        model = data.get("model", "")
+        if model == "" or "Qwen3-TTS" not in model:
+            return data
+        if "CustomVoice" in model:
+            data["task_type"] = "CustomVoice"
+            return data
+        elif "VoiceDesign" in model:
+            data["task_type"] = "VoiceDesign"
+            return data
+        elif "Base" in model:
+            data["task_type"] = "Base"
+        else:
+            raise ValueError(f"Cannot infer task_type from model name '{model}'.")
+        
+        references = data.get("references", [None])[0]
+        if references is not None and isinstance(references, dict):
+            data.pop("references")
+            ref_audio = references.get("audio", None)
+            ref_text = references.get("text", None)
+            if ref_audio is not None and ref_text is not None:
+                data["ref_audio"] = ref_audio
+                data["ref_text"] = ref_text
+        
+        return data
+
     @field_validator("stream_format")
     @classmethod
     def validate_stream_format(cls, v: str) -> str:

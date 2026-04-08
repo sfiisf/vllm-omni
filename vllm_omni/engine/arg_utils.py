@@ -243,6 +243,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
     quantization_config: Any | None = None
     worker_type: str | None = None
     task_type: str | None = None
+    core_num: int = 1
 
     def __post_init__(self) -> None:
         load_omni_general_plugins()

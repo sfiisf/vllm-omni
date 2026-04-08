@@ -3,7 +3,7 @@ stage_args:
   - stage_id: 0
     stage_type: llm
     runtime:
-      devices: "1"
+      devices: "0"
       max_batch_size: 1
     engine_args:
       model_stage: qwen3_tts_prepare
@@ -21,6 +21,7 @@ stage_args:
       distributed_executor_backend: "mp"
       max_num_batched_tokens: 8192
       max_model_len: 4096
+      core_num: 3
     default_sampling_params:
       temperature: 0.0
       top_p: 1.0
@@ -32,7 +33,7 @@ stage_args:
   - stage_id: 1
     stage_type: llm
     runtime:
-      devices: "0"
+      devices: "1"
       max_batch_size: 10
     engine_args:
       model_stage: qwen3_tts
@@ -51,6 +52,7 @@ stage_args:
       max_num_batched_tokens: 8192
       max_model_len: 4096
       custom_process_next_stage_input_func: vllm_omni.model_executor.stage_input_processors.qwen3_tts.talker2code2wav_async_chunk
+      core_num: 3
     engine_input_source: [0]
     custom_process_input_func: vllm_omni.model_executor.stage_input_processors.qwen3_tts_prepare.prepare2talker
     output_connectors:
@@ -67,7 +69,7 @@ stage_args:
   - stage_id: 2
     stage_type: llm
     runtime:
-      devices: "1"
+      devices: "0"
       max_batch_size: 10
     engine_args:
       model_stage: code2wav
@@ -85,6 +87,7 @@ stage_args:
       distributed_executor_backend: "mp"
       max_num_batched_tokens: 8192
       max_model_len: 32768
+      core_num: 3
     engine_input_source: [1]
     final_output: true
     final_output_type: audio

@@ -136,7 +136,7 @@ class OmniARScheduler(VLLMScheduler):
         return False
 
     def schedule(self) -> SchedulerOutput:  # type: ignore[override]
-        if self.chunk_transfer_adapter and not self.vllm_config.model_config.model.startswith("/maasjfs/hf_models/Qwen3-TTS-12Hz-1.7B"):
+        if self.chunk_transfer_adapter and not "Qwen3-TTS" in self.vllm_config.model_config.model:
             self.chunk_transfer_adapter.process_pending_chunks(self.waiting, self.running)
 
         try:
