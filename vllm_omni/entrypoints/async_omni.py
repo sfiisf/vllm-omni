@@ -589,6 +589,9 @@ class AsyncOmni(OmniBase):
                     next_stage = self.stage_list[1]
                     with metrics.stage_postprocess_timer(stage_id, request_id):
                         next_inputs = next_stage.process_engine_inputs(self.stage_list, prompt)
+                    timestamp = time.time()
+                    now = time.localtime(timestamp)
+                    logger.debug(f"{now.tm_hour}:{now.tm_min}:{now.tm_sec}.{int((timestamp - int(timestamp)) * 1000)}: stage0->1: request_id: {request_id}")
                     task = {
                         "request_id": request_id,
                         "engine_inputs": next_inputs,

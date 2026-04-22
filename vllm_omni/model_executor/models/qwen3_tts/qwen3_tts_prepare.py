@@ -346,7 +346,7 @@ class Qwen3TTSPrepare(nn.Module):
         *,
         task_type: str,
         info_dict: dict[str, Any],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int | None, bool]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int | None, bool, torch.Tensor | None]:
         text = (info_dict.get("text") or [""])[0]
         language = (info_dict.get("language") or ["Auto"])[0]
         non_streaming_mode_val = info_dict.get("non_streaming_mode")
@@ -418,6 +418,7 @@ class Qwen3TTSPrepare(nn.Module):
 
         speaker_embed = None
         ref_code_len: int | None = None
+        ref_code_prompt: torch.Tensor | None = None
 
         def _as_singleton(x: object) -> object:
             if isinstance(x, list):
@@ -478,7 +479,8 @@ class Qwen3TTSPrepare(nn.Module):
                 wav_np, sr = self._normalize_ref_audio(ref_audio_list[0])
                 ref_code_t = self._encode_ref_audio_to_code(wav_np, sr).to(device=input_ids.device)
                 ref_code_len = int(ref_code_t.shape[0])
-
+            if isinstance(ref_code_t, torch.Tensor):
+                ref_code_prompt = ref_code_t
             spk = _as_singleton(voice_clone_prompt.get("ref_spk_embedding")) if voice_clone_prompt is not None else None
             if isinstance(spk, torch.Tensor):
                 speaker_embed = spk.to(device=input_ids.device, dtype=torch.bfloat16).view(1, 1, -1)
@@ -631,6 +633,7 @@ class Qwen3TTSPrepare(nn.Module):
             tts_pad_embed.squeeze(0),
             ref_code_len,
             codec_streaming,
+            ref_code_prompt.contiguous() if isinstance(ref_code_prompt, torch.Tensor) else None,
         )
 
     @torch.no_grad()
@@ -651,17 +654,26 @@ class Qwen3TTSPrepare(nn.Module):
         tts_pad_embed: list[torch.Tensor] = []
         ref_code_len: list[torch.Tensor] = []
         codec_streaming: list[torch.Tensor] = []
+        ref_code: list[torch.Tensor | None] = []
 
         for info in info_dicts:
             if not isinstance(info, dict):
                 continue
             task_type = (info.get("task_type") or ["CustomVoice"])[0]
-            prompt, tail, pad, ref_len, streaming = self._build_prompt_embeds(task_type=task_type, info_dict=info)
+            prompt, tail, pad, ref_len, streaming, ref_code_prompt = self._build_prompt_embeds(
+                task_type=task_type,
+                info_dict=info,
+            )
             prepared_prompt_embeds.append(prompt.to(dtype=torch.float32))
             tailing_text_hidden.append(tail.to(dtype=torch.float32))
             tts_pad_embed.append(pad.to(dtype=torch.float32))
             ref_code_len.append(torch.tensor([ref_len if ref_len is not None else -1], dtype=torch.int32, device=pad.device))
             codec_streaming.append(torch.tensor([1 if streaming else 0], dtype=torch.int8, device=pad.device))
+            ref_code.append(
+                ref_code_prompt.detach().to("cpu").contiguous()
+                if isinstance(ref_code_prompt, torch.Tensor) and ref_code_prompt.numel() > 0
+                else None
+            )
 
         return OmniOutput(
             text_hidden_states=torch.empty((0, 1), device=self._module_device(self), dtype=torch.float32),
@@ -671,6 +683,7 @@ class Qwen3TTSPrepare(nn.Module):
                 "tts_pad_embed": tts_pad_embed,
                 "ref_code_len": ref_code_len,
                 "codec_streaming": codec_streaming,
+                "ref_code": ref_code,
             },
         )
 

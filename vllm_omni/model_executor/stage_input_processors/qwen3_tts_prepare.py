@@ -56,6 +56,12 @@ def prepare2talker(
             if ref_len >= 0:
                 add_info["ref_code_len"] = [ref_len]
 
+        ref_code_t = mm.get("ref_code")
+        if isinstance(ref_code_t, list):
+            ref_code_t = ref_code_t[0] if ref_code_t else None
+        if isinstance(ref_code_t, torch.Tensor) and ref_code_t.numel() > 0:
+            add_info["ref_code"] = ref_code_t.to(torch.long).cpu().contiguous()
+
         streaming_t = mm.get("codec_streaming")
         if isinstance(streaming_t, torch.Tensor) and streaming_t.numel() > 0:
             add_info["codec_streaming"] = [bool(int(streaming_t.reshape(-1)[0].item()))]

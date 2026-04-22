@@ -191,6 +191,10 @@ def talker2code2wav_async_chunk(
 
     code_predictor_codes = torch.tensor(window_frames).transpose(0, 1).reshape(-1).tolist()
 
+    timestamp = time.time()
+    now = time.localtime(timestamp)
+    logger.debug(f"{now.tm_hour}:{now.tm_min}:{now.tm_sec}.{int((timestamp - int(timestamp)) * 1000)}: stage1->2: request_id: {request_id}, length: {length}, context_length: {context_length}")
+
     return {
         "code_predictor_codes": code_predictor_codes,
         "left_context_size": left_context_size,

@@ -63,21 +63,7 @@ class OpenAICreateSpeechRequest(BaseModel):
 
     @model_validator(mode="before")
     def faas2vllm(cls, data: dict) -> dict:
-        """Convert FaaS-style request to vLLM-style request."""
-        model = data.get("model", "")
-        if model == "" or "Qwen3-TTS" not in model:
-            return data
-        if "CustomVoice" in model:
-            data["task_type"] = "CustomVoice"
-            return data
-        elif "VoiceDesign" in model:
-            data["task_type"] = "VoiceDesign"
-            return data
-        elif "Base" in model:
-            data["task_type"] = "Base"
-        else:
-            raise ValueError(f"Cannot infer task_type from model name '{model}'.")
-        
+        """Convert FaaS-style request to vLLM-style request."""        
         references = data.get("references", [None])[0]
         if references is not None and isinstance(references, dict):
             data.pop("references")

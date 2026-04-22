@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 import math
 import os
@@ -699,6 +700,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         base64_encode=False,
                     )
                     yield self.create_audio(audio_obj).audio_data
+                timestamp = time.time()
+                now = time.localtime(timestamp)
+                logger.debug(f"{now.tm_hour}:{now.tm_min}:{now.tm_sec}.{int((timestamp - int(timestamp)) * 1000)}: stage2->usr: request_id: {request_id} - emitted {prev_count} audio chunks so far")
         except asyncio.CancelledError:
             logger.info("Streaming request %s cancelled by client", request_id)
             raise
@@ -867,20 +871,27 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self,
         request: OpenAICreateSpeechRequest,
     ) -> tuple[list[float], int]:
-        spkid = request.voice.lower()
+        spkid = request.voice.lower() if isinstance(request.voice, str) else None
         if spkid is None:
             # logger.info(f"spkid is None, skip cache")
             return await self._resolve_ref_audio(request.ref_audio)
         
         if self._ref_audio_cache is None:
-            self._ref_audio_cache = LRUCache(maxsize=_CACHE_MAX_SIZE)
-        if spkid in self._ref_audio_cache:
+            if _CACHE_MAX_SIZE > 0:
+                self._ref_audio_cache = LRUCache(maxsize=_CACHE_MAX_SIZE)
+            else:
+                return await self._resolve_ref_audio(request.ref_audio)
+
+        hash_key = f"{spkid}:{hashlib.sha256(request.ref_audio.encode("utf-8")).hexdigest()}"
+
+        if hash_key in self._ref_audio_cache:
             # logger.info(f"Cache hit for spkid={spkid}")
-            return self._ref_audio_cache[spkid]
+            wav_list, sr = self._ref_audio_cache[hash_key]
+            return wav_list, sr
         
         # logger.info(f"Cache miss for spkid={spkid}, resolving ref_audio")
         wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
-        self._ref_audio_cache[spkid] = (wav_list, sr)
+        self._ref_audio_cache[hash_key] = (wav_list, sr)
         return wav_list, sr
 
     async def _prepare_speech_generation(
