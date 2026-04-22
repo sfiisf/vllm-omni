@@ -56,7 +56,7 @@ def prepare2talker(
             if ref_len >= 0:
                 add_info["ref_code_len"] = [ref_len]
 
-        ref_code_t = mm.get("ref_code")
+        ref_code_t = mm.get("ref_code", None)
         if isinstance(ref_code_t, list):
             ref_code_t = ref_code_t[0] if ref_code_t else None
         if isinstance(ref_code_t, torch.Tensor) and ref_code_t.numel() > 0:

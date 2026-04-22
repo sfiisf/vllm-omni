@@ -669,12 +669,25 @@ class Qwen3TTSPrepare(nn.Module):
             tts_pad_embed.append(pad.to(dtype=torch.float32))
             ref_code_len.append(torch.tensor([ref_len if ref_len is not None else -1], dtype=torch.int32, device=pad.device))
             codec_streaming.append(torch.tensor([1 if streaming else 0], dtype=torch.int8, device=pad.device))
-            ref_code.append(
-                ref_code_prompt.detach().to("cpu").contiguous()
-                if isinstance(ref_code_prompt, torch.Tensor) and ref_code_prompt.numel() > 0
-                else None
-            )
+            if ref_code_prompt is not None:
+                ref_code.append(
+                    ref_code_prompt.detach().to("cpu").contiguous()
+                    if isinstance(ref_code_prompt, torch.Tensor) and ref_code_prompt.numel() > 0
+                    else None
+                )
 
+        if len(ref_code) == 0:
+            return OmniOutput(
+                text_hidden_states=torch.empty((0, 1), device=self._module_device(self), dtype=torch.float32),
+                multimodal_outputs={
+                    "prepared_prompt_embeds": prepared_prompt_embeds,
+                    "tailing_text_hidden": tailing_text_hidden,
+                    "tts_pad_embed": tts_pad_embed,
+                    "ref_code_len": ref_code_len,
+                    "codec_streaming": codec_streaming,
+                },
+            )
+        
         return OmniOutput(
             text_hidden_states=torch.empty((0, 1), device=self._module_device(self), dtype=torch.float32),
             multimodal_outputs={
