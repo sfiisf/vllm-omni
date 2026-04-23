@@ -64,6 +64,9 @@ class OpenAICreateSpeechRequest(BaseModel):
     @model_validator(mode="before")
     def faas2vllm(cls, data: dict) -> dict:
         """Convert FaaS-style request to vLLM-style request."""        
+        if "model" in data and data["model"] is not None:
+            data.pop("model")
+        
         references = data.get("references", [None])[0]
         if references is not None and isinstance(references, dict):
             data.pop("references")
