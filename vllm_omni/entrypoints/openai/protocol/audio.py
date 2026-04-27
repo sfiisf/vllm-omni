@@ -66,6 +66,8 @@ class OpenAICreateSpeechRequest(BaseModel):
         """Convert FaaS-style request to vLLM-style request."""        
         if "model" in data and data["model"] is not None:
             data.pop("model")
+        if "max_tokens" in data and data["max_tokens"] is not None:
+            data["max_new_tokens"] = data.pop("max_tokens")
         
         references = data.get("references", [None])[0]
         if references is not None and isinstance(references, dict):

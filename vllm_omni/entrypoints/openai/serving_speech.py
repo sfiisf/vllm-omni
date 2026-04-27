@@ -147,6 +147,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             self._tts_stage is not None and getattr(self._tts_stage, "model_stage", None) == "fish_speech_slow_ar"
         )
         self._fish_speech_tokenizer = None
+        self._is_qwen_speech = (
+            self._tts_stage is not None and "qwen3_tts" in getattr(self._tts_stage, "model_stage", None)
+        )
 
         # Cache TTS configuration values (computed once, reused per request)
         self._max_instructions_length = self._compute_max_instructions_length()
@@ -513,10 +516,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
     def _validate_tts_request(self, request: OpenAICreateSpeechRequest) -> str | None:
         """Validate TTS request parameters. Returns error message or None."""
-        # Infer Base task when ref_audio or ref_text is provided without explicit task_type.
-        if request.task_type is None and (request.ref_audio is not None or request.ref_text is not None):
+        # use load model info replace request info
+        model_name = self.engine_client.model_config.model.lower()
+        if "custom" in model_name:
+            request.task_type = "CustomVoice"
+        elif "voicedesign" in model_name:
+            request.task_type = "VoiceDesign"
+        elif "base" in model_name:
             request.task_type = "Base"
-        task_type = request.task_type or "CustomVoice"
+        else:
+            return f"Unable to infer task_type from model name '{self.engine_client.model_config.model}'."
+        task_type = request.task_type
 
         # Normalize voice to lowercase for case-insensitive matching
         if request.voice is not None:
@@ -953,6 +963,19 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             sampling_params_list = copy.deepcopy(sampling_params_list)
             sampling_params_list[0].max_tokens = request.max_new_tokens
+
+        # Override qwen3_tts stage max_tokens if specified (TTS models).
+        if self._is_tts and request.max_new_tokens is not None and sampling_params_list:
+            import copy
+
+            sampling_params_list = copy.deepcopy(sampling_params_list)
+            target_stage_idx = -1
+            for idx, stage in enumerate(getattr(self.engine_client, "stage_list", []) or []):
+                if getattr(stage, "model_stage", None) == "qwen3_tts":
+                    target_stage_idx = idx
+                    break
+            if target_stage_idx != -1:
+                sampling_params_list[target_stage_idx].max_tokens = request.max_new_tokens
 
         generator = self.engine_client.generate(
             prompt=prompt,
