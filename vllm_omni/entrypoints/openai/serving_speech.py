@@ -1836,9 +1836,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             sampling_params_list[0].extra_args.update(request.extra_params)
             logger.info("Applied extra_params: %s", request.extra_params)
 
-        # Fish defaults come from stage_configs YAML. Only override when the caller
-        # explicitly requests a different generation length.
-        if self._is_fish_speech and request.max_new_tokens is not None and sampling_params_list:
+        # Fish and Qwen3-TTS defaults come from stage_configs YAML. Their AR
+        # generation length is controlled by SamplingParams.max_tokens, so only
+        # override it when the caller explicitly requests max_new_tokens.
+        if (
+            (self._is_fish_speech or self._tts_model_type == "qwen3_tts")
+            and request.max_new_tokens is not None
+            and sampling_params_list
+        ):
             import copy
 
             sampling_params_list = copy.deepcopy(sampling_params_list)
