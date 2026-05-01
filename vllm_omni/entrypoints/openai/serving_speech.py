@@ -197,6 +197,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         return instance
 
     def __init__(self, *args, **kwargs):
+        self.model_name = kwargs.pop("model_name", None)
         super().__init__(*args, **kwargs)
         # Initialize uploaded speakers storage (ephemeral — cleared on restart)
         speech_voice_samples_dir = os.environ.get("SPEECH_VOICE_SAMPLES", "/tmp/voice_samples")
@@ -251,6 +252,27 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self._build_voxtral_prompt_async = make_async(self._build_voxtral_prompt, executor=self._tts_executor)
         self._build_fish_speech_prompt_async = make_async(self._build_fish_speech_prompt, executor=self._tts_executor)
         self._estimate_prompt_len_async = make_async(self._estimate_prompt_len, executor=self._tts_executor)
+
+    def _get_qwen_tts_expected_speaker_embedding_dim(self) -> int | None:
+        """Return the loaded Qwen3-TTS speaker embedding dim, if known.
+
+        The user-provided speaker embedding is concatenated directly with
+        talker codec embeddings, so the real compatibility requirement is the
+        talker hidden size.
+        """
+        if self._tts_model_type != "qwen3_tts":
+            return None
+        hf_config = self.engine_client.model_config.hf_config
+        talker_config = hf_config.talker_config
+        return int(talker_config.hidden_size)
+
+    def _validate_qwen_tts_speaker_embedding_dim(self, emb_dim: int) -> str | None:
+        expected_dim = self._get_qwen_tts_expected_speaker_embedding_dim()
+        if expected_dim is None:
+            return None
+        if emb_dim != expected_dim:
+            return f"speaker_embedding has {emb_dim} dimensions; expected {expected_dim} for the loaded Qwen3-TTS model"
+        return None
 
     def _load_codec_frame_rate(self) -> float | None:
         """Load codec frame rate from speech tokenizer config for prompt length estimation."""
@@ -756,11 +778,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             raise ValueError("'speaker_embedding' values must be finite (no NaN or Inf)")
 
         emb_dim = len(embedding)
-        if emb_dim not in {1024, 2048}:
-            logger.warning(
-                "speaker_embedding has %d dimensions; expected 1024 (0.6B) or 2048 (1.7B)",
-                emb_dim,
-            )
+        dim_err = self._validate_qwen_tts_speaker_embedding_dim(emb_dim)
+        if dim_err is not None:
+            raise ValueError(dim_err)
 
         voice_name_lower = name.lower()
         if voice_name_lower in self.uploaded_speakers:
@@ -1031,15 +1051,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             # Base task validation so callers don't need to pass it explicitly.
             request.x_vector_only_mode = True
             emb_len = len(request.speaker_embedding)
-            # ECAPA-TDNN produces 1024-dim (0.6B) or 2048-dim (1.7B)
-            expected_dims = {1024, 2048}
-            if emb_len not in expected_dims:
-                logger.warning(
-                    "speaker_embedding has %d dimensions; expected 1024 "
-                    "(0.6B model) or 2048 (1.7B model). Wrong dimensions "
-                    "will likely result in errors or degraded quality.",
-                    emb_len,
-                )
+            dim_err = self._validate_qwen_tts_speaker_embedding_dim(emb_len)
+            if dim_err is not None:
+                return dim_err
         # Validate Base task requirements
         if task_type == "Base":
             if request.voice is None:
@@ -1955,6 +1969,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if not request.input or not request.input.strip():
                 raise ValueError("Input text cannot be empty")
 
+            # Validate ref_audio format up-front so that bogus inputs return a
+            # 4xx instead of falling through to MediaConnector and surfacing as
+            # a 500 Internal Server Error (e.g. test_voice_clone_invalid_ref_audio_format).
+            if request.ref_audio is not None:
+                fmt_err = self._validate_ref_audio_format(request.ref_audio)
+                if fmt_err:
+                    return self._diffusion_error_response(fmt_err, status_code=400)
+
             request_id = f"speech-{random_uuid()}"
             prompt: dict[str, Any] = {"input": request.input}
             if request.ref_audio:
@@ -2021,16 +2043,28 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         except (EngineGenerateError, EngineDeadError):
             raise  # Propagate to the global Omni exception handler
         except ValueError as e:
-            return self._diffusion_error_response(str(e))
+            # ValueError represents invalid client input (bad ref_audio URI,
+            # empty text, model-side validation failures forwarded as ValueError, ...).
+            # Return 400 to match `create_speech`'s `self.create_error_response(e)`
+            # default (HTTPStatus.BAD_REQUEST) rather than masking it as a 500.
+            return self._diffusion_error_response(str(e), status_code=400)
         except Exception as e:
             logger.exception("Diffusion speech generation failed: %s", e)
             return self._diffusion_error_response(f"Speech generation failed: {e}")
 
     @staticmethod
-    def _diffusion_error_response(message: str) -> Response:
-        """Create a JSON error response without depending on OpenAIServing."""
-        error_body = json.dumps({"error": {"message": message, "type": "server_error", "param": None, "code": 500}})
-        return Response(content=error_body, media_type="application/json", status_code=500)
+    def _diffusion_error_response(message: str, status_code: int = 500) -> Response:
+        """Create a JSON error response without depending on OpenAIServing.
+
+        Args:
+            message: Error message to surface to the client.
+            status_code: HTTP status code; defaults to 500. Pass a 4xx code for
+                client-input validation failures so the response semantics match
+                the OpenAI-compatible behavior used by ``create_speech``.
+        """
+        err_type = "BadRequestError" if 400 <= status_code < 500 else "server_error"
+        error_body = json.dumps({"error": {"message": message, "type": err_type, "param": None, "code": status_code}})
+        return Response(content=error_body, media_type="application/json", status_code=status_code)
 
     async def create_speech(
         self,
