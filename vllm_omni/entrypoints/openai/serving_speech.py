@@ -52,6 +52,14 @@ _TTS_MAX_NEW_TOKENS_MAX = 4096
 
 _CACHE_MAX_SIZE = int(os.getenv("TTS_CACHE_MAX_SIZE", 1000))
 
+_RETURN_URL = os.getenv("RETURN_URL", "False").lower() == "true"
+_OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://s3.6scloud.com")
+_OSS_REGION = os.getenv("OSS_REGION", "cn-east-1")
+_OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", None)
+_OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID", None)
+_OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET", None)
+_OSS_ExpiresIn_TIME = int(os.getenv("OSS_ExpiresIn_TIME", 604800))
+
 def _create_wav_header(sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
     """Create a WAV header with placeholder size values for streaming.
 
@@ -170,6 +178,20 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self._codec_frame_rate: float | None = self._load_codec_frame_rate()
 
         self._ref_audio_cache: LRUCache[str, tuple[np.ndarray, int]] | None = None
+
+        self.s3_client = None
+        if _RETURN_URL:
+            if not all([_OSS_ENDPOINT, _OSS_REGION, _OSS_BUCKET_NAME, _OSS_ACCESS_KEY_ID, _OSS_ACCESS_KEY_SECRET]):
+                logger.error("OSS configuration is incomplete")
+                raise ValueError("Incomplete OSS configuration for RETURN_URL")
+            import boto3
+            self.s3_client = boto3.client(
+                's3',
+                endpoint_url=_OSS_ENDPOINT,
+                aws_access_key_id=_OSS_ACCESS_KEY_ID,
+                aws_secret_access_key=_OSS_ACCESS_KEY_SECRET,
+                region_name=_OSS_REGION
+            )
 
     def _load_codec_frame_rate(self) -> float | None:
         """Load codec frame rate from speech tokenizer config for prompt length estimation."""
@@ -1034,6 +1056,73 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         audio_response: AudioResponse = self.create_audio(audio_obj)
         return audio_response.audio_data, audio_response.media_type
 
+    async def _generate_audio_url(
+        self,
+        request: OpenAICreateSpeechRequest,
+        request_id: str,
+        generator,
+    ):
+        if not _RETURN_URL:
+            raise ValueError("Audio URL generation is not enabled in this server configuration")
+        if self.s3_client is None:
+            raise ValueError("S3 client is not configured for audio URL generation")
+
+
+        final_output: OmniRequestOutput | None = None
+        async for res in generator:
+            final_output = res
+
+        if final_output is None:
+            raise ValueError("No output generated from the model.")
+
+        audio_output, audio_key = self._extract_audio_output(final_output)
+        if audio_key is None:
+            raise ValueError("TTS model did not produce audio output.")
+
+        audio_tensor = audio_output[audio_key]
+        sr_raw = audio_output.get("sr", 24000)
+        sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+        sample_rate = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+
+        if isinstance(audio_tensor, list):
+            import torch
+
+            audio_tensor = torch.cat(audio_tensor, dim=-1)
+        if hasattr(audio_tensor, "float"):
+            audio_tensor = audio_tensor.float().detach().cpu().numpy()
+
+        if audio_tensor.ndim > 1:
+            audio_tensor = audio_tensor.squeeze()
+
+        audio_obj = CreateAudio(
+            audio_tensor=audio_tensor,
+            sample_rate=sample_rate,
+            response_format=request.response_format or "wav",
+            speed=request.speed or 1.0,
+            stream_format=request.stream_format,
+            base64_encode=False,
+        )
+        audio_response: AudioResponse = self.create_audio(audio_obj)
+
+        os.makedirs("audio_outputs", exist_ok=True)
+        output_path = os.path.join("audio_outputs", f"{request_id}.{request.response_format or "wav"}")
+        with open(output_path, "wb") as f:
+            f.write(audio_response.audio_data)
+        try:
+            self.s3_client.upload_file(output_path, _OSS_BUCKET_NAME, output_path)
+            url = self.s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": _OSS_BUCKET_NAME, "Key": output_path},
+                ExpiresIn=_OSS_ExpiresIn_TIME,
+            )
+        except Exception as e:
+            logger.error("Failed to upload audio to S3: %s", e)
+            raise ValueError(f"Failed to upload audio to S3: {e}")
+        finally:
+            os.remove(output_path)
+        
+        return url
+
     async def create_speech(
         self,
         request: OpenAICreateSpeechRequest,
@@ -1065,6 +1154,20 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return error_check_ret
 
         try:
+            if _RETURN_URL:
+                request_id, generator, _ = await self._prepare_speech_generation(request)
+                url = await self._generate_audio_url(request=request, request_id=request_id, generator=generator)
+                return {
+                    "status": "Succeed",
+                    "results": {
+                        "audios": [
+                            {
+                                "url": url,
+                            }
+                        ]
+                    }
+                }
+
             if request.stream:
                 # Determine response format and media type for streaming
                 response_format = (request.response_format or "wav").lower()

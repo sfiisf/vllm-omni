@@ -10,6 +10,8 @@ from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     max_ic_for_chunk_size,
 )
 
+import time
+
 logger = init_logger(__name__)
 
 
