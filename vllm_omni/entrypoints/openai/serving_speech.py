@@ -7,6 +7,7 @@ import os
 import re
 import struct
 import time
+import aioboto3
 from pathlib import Path
 from typing import Any
 from cachetools import LRUCache
@@ -179,18 +180,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         self._ref_audio_cache: LRUCache[str, tuple[np.ndarray, int]] | None = None
 
-        self.s3_client = None
+        self.session = None
         if _RETURN_URL:
             if not all([_OSS_ENDPOINT, _OSS_REGION, _OSS_BUCKET_NAME, _OSS_ACCESS_KEY_ID, _OSS_ACCESS_KEY_SECRET]):
                 logger.error("OSS configuration is incomplete")
                 raise ValueError("Incomplete OSS configuration for RETURN_URL")
-            import boto3
-            self.s3_client = boto3.client(
-                's3',
-                endpoint_url=_OSS_ENDPOINT,
+            self.session = aioboto3.Session(
                 aws_access_key_id=_OSS_ACCESS_KEY_ID,
                 aws_secret_access_key=_OSS_ACCESS_KEY_SECRET,
-                region_name=_OSS_REGION
+                region_name=_OSS_REGION,
             )
 
     def _load_codec_frame_rate(self) -> float | None:
@@ -1064,8 +1062,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     ):
         if not _RETURN_URL:
             raise ValueError("Audio URL generation is not enabled in this server configuration")
-        if self.s3_client is None:
-            raise ValueError("S3 client is not configured for audio URL generation")
+        if self.session is None:
+            raise ValueError("OSS session is not available for audio URL generation")
 
 
         final_output: OmniRequestOutput | None = None
@@ -1109,12 +1107,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         with open(output_path, "wb") as f:
             f.write(audio_response.audio_data)
         try:
-            self.s3_client.upload_file(output_path, _OSS_BUCKET_NAME, output_path)
-            url = self.s3_client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": _OSS_BUCKET_NAME, "Key": output_path},
-                ExpiresIn=_OSS_ExpiresIn_TIME,
-            )
+            async with self.session.client("s3", endpoint_url=_OSS_ENDPOINT) as s3_client:
+                await s3_client.upload_file(output_path, _OSS_BUCKET_NAME, output_path)
+                url = await s3_client.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": _OSS_BUCKET_NAME, "Key": output_path},
+                    ExpiresIn=_OSS_ExpiresIn_TIME,
+                )
         except Exception as e:
             logger.error("Failed to upload audio to S3: %s", e)
             raise ValueError(f"Failed to upload audio to S3: {e}")
