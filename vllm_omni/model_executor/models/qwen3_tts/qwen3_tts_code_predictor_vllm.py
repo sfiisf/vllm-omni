@@ -348,6 +348,13 @@ class Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM(nn.Module):
 
         # torch.compile: fuse small kernels in the 5-layer transformer.
         self._compiled_model_fwd: object | None = None
+        self._compiled_model_fwd_graph: object | None = None
+
+        self.max_batch_size = 8
+        self.static_projected: torch.Tensor | None = None
+        self.static_pos_ids: torch.Tensor | None = None
+        self.static_hidden_out: torch.Tensor | None = None
+        self.static_graph_dict: dict[int | tuple[int, int], torch.cuda.CUDAGraph] | None = None
 
     def get_input_embeddings(self) -> nn.ModuleList:
         return self.model.get_input_embeddings()
@@ -417,6 +424,51 @@ class Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM(nn.Module):
         )
         logger.info("code_predictor: torch.compile enabled (mode=default)")
 
+    def _capture_cuda_graphs(self) -> None:
+        if self.static_graph_dict is not None:
+            return
+        self.static_graph_dict = {}
+        
+        from vllm.platforms import current_platform
+
+        pool = current_platform.get_global_graph_pool()
+        max_seq = self._num_groups + 1
+        max_batch_size = self.max_batch_size
+
+        self._compiled_model_fwd_graph = torch.compile(
+            self.model.forward,
+            dynamic=False,
+            options={
+                "epilogue_fusion": False,
+            },
+        )
+
+        for bsz in range(1, max_batch_size + 1):
+            for _ in range(3):
+                self._compiled_model_fwd_graph(
+                    torch.zeros(bsz, max_seq, self._cp_hidden, device=self._proj_buf.device, dtype=self._proj_buf.dtype),
+                    torch.arange(max_seq, dtype=torch.long, device=self._pos_ids.device).unsqueeze(0).expand(bsz, -1).contiguous(),
+                )
+
+        if self.static_projected is None:
+            self.static_projected = torch.zeros(max_batch_size, max_seq, self._cp_hidden, device=self._proj_buf.device, dtype=self._proj_buf.dtype)
+        if self.static_pos_ids is None:
+            self.static_pos_ids = torch.arange(max_seq, dtype=torch.long, device=self._pos_ids.device).unsqueeze(0).expand(max_batch_size, -1).contiguous()
+        if self.static_hidden_out is None:
+            self.static_hidden_out = torch.zeros(max_batch_size, max_seq, self._cp_hidden, device=self._proj_buf.device, dtype=self._proj_buf.dtype)
+
+        for bsz in range(1, max_batch_size + 1):
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, pool=pool):
+                self.static_hidden_out[:bsz, :max_seq, :] = self._compiled_model_fwd_graph(self.static_projected[:bsz, :max_seq, :], self.static_pos_ids[:bsz, :max_seq])
+    
+            self.static_graph_dict[bsz] = g
+
+    def _get_cuda_graph(self, batch_size: int) -> torch.cuda.CUDAGraph | None:
+        if self.static_graph_dict is None or batch_size not in self.static_graph_dict:
+            return None
+        return self.static_graph_dict[batch_size]
+
     # ------------------------------------------------------------------
     #  Optimized forward: re-prefill + torch.compile + projection cache
     # ------------------------------------------------------------------
@@ -468,14 +520,22 @@ class Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM(nn.Module):
             raise NotImplementedError(
                 "top_p sampling is not implemented for the vLLM-native code predictor; please set top_p=1.0."
             )
+        
+        if self.static_graph_dict is None:
+            self._capture_cuda_graphs()
 
         for step in range(1, num_groups):
             seq_len = step + 1
-
-            projected = proj_buf[:bsz, :seq_len, :]
-            step_pos_ids = pos_ids[:seq_len] if bsz == 1 else pos_ids[:seq_len].repeat(bsz)
-
-            hidden_out = model_fwd(projected, step_pos_ids)
+            g = self._get_cuda_graph(bsz)
+            if g is not None:
+                self.static_projected[:bsz, :seq_len, :].copy_(proj_buf[:bsz, :seq_len, :])
+                self.static_pos_ids[:bsz, :seq_len].copy_(pos_ids[:seq_len].unsqueeze(0).expand(bsz, -1).contiguous())
+                g.replay()
+                hidden_out = self.static_hidden_out[:bsz, :seq_len, :].clone()
+            else:
+                projected = proj_buf[:bsz, :seq_len, :]
+                step_pos_ids = pos_ids[:seq_len] if bsz == 1 else pos_ids[:seq_len].repeat(bsz)
+                hidden_out = model_fwd(projected, step_pos_ids)
 
             logits = lm_heads[step - 1](hidden_out[:, -1, :])
 
