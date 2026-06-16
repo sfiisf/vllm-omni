@@ -544,6 +544,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             request.task_type = "VoiceDesign"
         elif "base" in model_name:
             request.task_type = "Base"
+            request.non_streaming_mode = False
         else:
             return f"Unable to infer task_type from model name '{self.engine_client.model_config.model}'."
         task_type = request.task_type
@@ -821,6 +822,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         # CustomVoice and Base rely on the model default (True and False respectively).
         if params["task_type"][0] == "VoiceDesign":
             params["non_streaming_mode"] = [True]
+
+        if request.non_streaming_mode is not None:
+            params["non_streaming_mode"] = [request.non_streaming_mode]
 
         return params
 

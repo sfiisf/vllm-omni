@@ -60,6 +60,9 @@ class OpenAICreateSpeechRequest(BaseModel):
         ge=0,
         description="Per-request initial chunk size override. If null, computed dynamically based on server load.",
     )
+    non_streaming_mode: bool | None = Field (
+        default=None,
+    )
 
     @model_validator(mode="before")
     def faas2vllm(cls, data: dict) -> dict:
