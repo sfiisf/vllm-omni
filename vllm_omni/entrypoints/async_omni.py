@@ -563,8 +563,7 @@ class AsyncOmni(OmniBase):
         final_stage_id_for_e2e: int,
     ) -> AsyncGenerator[OmniRequestOutput, None]:
         all_stages_finished = {stage_id: False for stage_id in range(final_stage_id_for_e2e + 1)}
-        stage1_submitted = False
-        downstream_async_seeded = False
+        submit_flag = True
         _loop_iter = 0
         _last_progress_ts = time.time()
         while not all(all_stages_finished.values()):
@@ -584,46 +583,23 @@ class AsyncOmni(OmniBase):
                     stage_id,
                     metrics,
                 )
-                if finished and stage_id == 0 and not stage1_submitted and final_stage_id_for_e2e >= 1:
-                    stage.set_engine_outputs([engine_outputs])
-                    next_stage = self.stage_list[1]
-                    with metrics.stage_postprocess_timer(stage_id, request_id):
-                        next_inputs = next_stage.process_engine_inputs(self.stage_list, prompt)
-                    timestamp = time.time()
-                    now = time.localtime(timestamp)
-                    logger.debug(f"{now.tm_hour}:{now.tm_min}:{now.tm_sec}.{int((timestamp - int(timestamp)) * 1000)}: stage0->1: request_id: {request_id}")
-                    task = {
-                        "request_id": request_id,
-                        "engine_inputs": next_inputs,
-                        "sampling_params": sampling_params_list[1],
-                    }
-                    # next_stage.submit(task)
-                    connector_key = ("0", "1")
-                    connector = self.connectors.get(connector_key)
-                    if connector:
-                        sent_via_connector = try_send_via_connector(
-                            connector=connector,
-                            stage_id=0,
-                            next_stage_id=1,
-                            req_id=request_id,
-                            next_inputs=next_inputs,
-                            sampling_params=sampling_params_list[1],
-                            original_prompt=prompt,
-                            next_stage_queue_submit_fn=self.stage_list[1].submit,
-                            metrics=metrics,
-                        )
-                        if not sent_via_connector:
-                            logger.error(
-                                f"[{self._name}] Failed to send request {request_id} to stage-1 via connector. "
-                                "Configure a connector for this edge or inspect connector logs for details."
-                            )
-                            raise RuntimeError("Failed to send request to stage-1 via connector")
-                    metrics.stage_first_ts[1] = time.time()
-                    stage1_submitted = True
-
-                if stage1_submitted and not downstream_async_seeded and final_stage_id_for_e2e >= 2:
-                    engine_input = _build_async_seed_engine_input(prompt, engine_outputs)
-                    for i in range(2, final_stage_id_for_e2e + 1):
+                if submit_flag and stage_id == 0:
+                    submit_flag = False
+                    prompt_token_ids = getattr(engine_outputs, "prompt_token_ids", None)
+                    if prompt_token_ids is None:
+                        prompt_token_ids = []
+                    engine_input = copy.deepcopy(prompt)
+                    try:
+                        next_prompt_len = max(1, compute_talker_prompt_ids_length(prompt_token_ids))
+                    except Exception:
+                        raise
+                    engine_input["prompt_token_ids"] = [0] * next_prompt_len
+                    engine_input["multi_modal_data"] = engine_input["mm_processor_kwargs"] = None
+                    for _mm_key in ("mm_kwargs", "mm_hashes", "mm_placeholders", "multi_modal_uuids"):
+                        engine_input.pop(_mm_key, None)
+                    if engine_input.get("type") == "multimodal":
+                        engine_input["type"] = "token"
+                    for i in range(1, len(self.stage_list)):
                         task = {
                             "request_id": request_id,
                             "engine_inputs": engine_input,
