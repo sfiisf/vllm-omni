@@ -524,6 +524,8 @@ class Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM(nn.Module):
         if self.static_graph_dict is None:
             self._capture_cuda_graphs()
 
+        rand_g = -torch.log(-torch.log(torch.rand(self._num_groups, bsz, self.config.vocab_size, device=device)))
+
         for step in range(1, num_groups):
             seq_len = step + 1
             g = self._get_cuda_graph(bsz)
@@ -544,8 +546,7 @@ class Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM(nn.Module):
                 if top_k > 0:
                     topk_vals, _ = scaled.topk(top_k, dim=-1)
                     scaled = scaled.masked_fill(scaled < topk_vals[:, -1:], float("-inf"))
-                probs = F.softmax(scaled, dim=-1)
-                next_ids = torch.multinomial(probs, num_samples=1)
+                next_ids = (scaled + rand_g[step - 1, :bsz, :]).argmax(dim=-1, keepdim=True)
             else:
                 next_ids = logits.argmax(dim=-1, keepdim=True)
 
