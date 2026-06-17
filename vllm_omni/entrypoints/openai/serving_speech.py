@@ -30,6 +30,8 @@ from vllm_omni.entrypoints.openai.protocol.audio import (
 )
 from vllm_omni.outputs import OmniRequestOutput
 
+from .oss_client import OssClient
+
 logger = init_logger(__name__)
 
 # TTS Configuration (currently supports Qwen3-TTS)
@@ -181,16 +183,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         self._ref_audio_cache: LRUCache[str, tuple[np.ndarray, int]] | None = None
 
-        self.session = None
+        self.oss_client = None
         if _RETURN_URL:
-            if not all([_OSS_ENDPOINT, _OSS_REGION, _OSS_BUCKET_NAME, _OSS_ACCESS_KEY_ID, _OSS_ACCESS_KEY_SECRET]):
-                logger.error("OSS configuration is incomplete")
-                raise ValueError("Incomplete OSS configuration for RETURN_URL")
-            self.session = aioboto3.Session(
-                aws_access_key_id=_OSS_ACCESS_KEY_ID,
-                aws_secret_access_key=_OSS_ACCESS_KEY_SECRET,
-                region_name=_OSS_REGION,
-            )
+            try:
+                self.oss_client = OssClient()
+            except Exception as e:
+                logger.error(f"Failed to initialize OssClient: {e}")
+                self.oss_client = None
 
     def _load_codec_frame_rate(self) -> float | None:
         """Load codec frame rate from speech tokenizer config for prompt length estimation."""
@@ -1070,8 +1069,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     ):
         if not _RETURN_URL:
             raise ValueError("Audio URL generation is not enabled in this server configuration")
-        if self.session is None:
-            raise ValueError("OSS session is not available for audio URL generation")
+        if self.oss_client is None:
+            raise ValueError("OSS client is not available for audio URL generation")
 
 
         final_output: OmniRequestOutput | None = None
@@ -1110,18 +1109,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         )
         audio_response: AudioResponse = self.create_audio(audio_obj)
 
-        os.makedirs("audio_outputs", exist_ok=True)
-        output_path = os.path.join("audio_outputs", f"{request_id}.{request.response_format or "wav"}")
+        local_menu = "audio_outputs"
+        file_name = f"{request_id}.{request.response_format or 'wav'}"
+        os.makedirs(local_menu, exist_ok=True)
+        output_path = os.path.join(local_menu, file_name)
         with open(output_path, "wb") as f:
             f.write(audio_response.audio_data)
         try:
-            async with self.session.client("s3", endpoint_url=_OSS_ENDPOINT) as s3_client:
-                await s3_client.upload_file(output_path, _OSS_BUCKET_NAME, output_path)
-                url = await s3_client.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": _OSS_BUCKET_NAME, "Key": output_path},
-                    ExpiresIn=_OSS_ExpiresIn_TIME,
-                )
+            url = self.oss_client.upload_file(
+                file_name=file_name,
+                local_menu=local_menu,
+            )
         except Exception as e:
             logger.error("Failed to upload audio to S3: %s", e)
             raise ValueError(f"Failed to upload audio to S3: {e}")
