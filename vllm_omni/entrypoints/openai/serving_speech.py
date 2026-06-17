@@ -52,6 +52,7 @@ _TTS_MAX_NEW_TOKENS_MIN = 1
 _TTS_MAX_NEW_TOKENS_MAX = 4096
 
 _CACHE_MAX_SIZE = int(os.getenv("TTS_CACHE_MAX_SIZE", 1000))
+_NON_STREAMING_THRESHOLD = int(os.getenv("TTS_NON_STREAMING_THRESHOLD", 1024))
 
 _RETURN_URL = os.getenv("RETURN_URL", "False").lower() == "true"
 _OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://s3.6scloud.com")
@@ -818,13 +819,16 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.initial_codec_chunk_frames is not None:
             params["initial_codec_chunk_frames"] = [request.initial_codec_chunk_frames]
 
-        # VoiceDesign requires non_streaming_mode (match offline script behaviour).
-        # CustomVoice and Base rely on the model default (True and False respectively).
-        if params["task_type"][0] == "VoiceDesign":
-            params["non_streaming_mode"] = [True]
-
-        if request.non_streaming_mode is not None:
-            params["non_streaming_mode"] = [request.non_streaming_mode]
+        if params["task_type"][0] in ["CustomVoice", "VoiceDesign"]:
+            if request.non_streaming_mode is None:
+                if request.input and len(request.input) <= _NON_STREAMING_THRESHOLD:
+                    params["non_streaming_mode"] = [True]
+                else:
+                    params["non_streaming_mode"] = [False]
+            else:
+                params["non_streaming_mode"] = [request.non_streaming_mode]
+        elif params["task_type"][0] == "Base":
+            params["non_streaming_mode"] = [False]
 
         return params
 
