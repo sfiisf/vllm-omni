@@ -7,7 +7,6 @@ import os
 import re
 import struct
 import time
-import aioboto3
 from pathlib import Path
 from typing import Any
 from cachetools import LRUCache
@@ -30,7 +29,7 @@ from vllm_omni.entrypoints.openai.protocol.audio import (
 )
 from vllm_omni.outputs import OmniRequestOutput
 
-from .oss_client import OssClient
+from .object_storage_client import ObjectStorageClient
 
 logger = init_logger(__name__)
 
@@ -183,13 +182,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         self._ref_audio_cache: LRUCache[str, tuple[np.ndarray, int]] | None = None
 
-        self.oss_client = None
+        self.object_storage_client = None
         if _RETURN_URL:
             try:
-                self.oss_client = OssClient()
+                self.object_storage_client = ObjectStorageClient()
             except Exception as e:
                 logger.error(f"Failed to initialize OssClient: {e}")
-                self.oss_client = None
+                self.object_storage_client = None
 
     def _load_codec_frame_rate(self) -> float | None:
         """Load codec frame rate from speech tokenizer config for prompt length estimation."""
@@ -1069,8 +1068,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     ):
         if not _RETURN_URL:
             raise ValueError("Audio URL generation is not enabled in this server configuration")
-        if self.oss_client is None:
-            raise ValueError("OSS client is not available for audio URL generation")
+        if self.object_storage_client is None:
+            raise ValueError("Object storage client is not available for audio URL generation")
 
 
         final_output: OmniRequestOutput | None = None
@@ -1116,7 +1115,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         with open(output_path, "wb") as f:
             f.write(audio_response.audio_data)
         try:
-            url = self.oss_client.upload_file(
+            url = self.object_storage_client.upload_file(
                 file_name=file_name,
                 local_menu=local_menu,
             )
